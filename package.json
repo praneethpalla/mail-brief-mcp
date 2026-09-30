@@ -1,0 +1,38 @@
+{
+  "name": "mail-brief-mcp",
+  "version": "0.1.0",
+  "description": "A small, least-privilege MCP server for email: summarize and draft replies, nothing else. Works with any IMAP provider.",
+  "type": "module",
+  "main": "src/server.js",
+  "bin": {
+    "mail-brief-mcp": "src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "email",
+    "imap",
+    "ai-agents",
+    "least-privilege"
+  ],
+  "author": "praneethpalla",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.24.3",
+    "dom-serializer": "^2.0.0",
+    "domutils": "^3.2.2",
+    "dotenv": "^17.2.1",
+    "html-to-text": "^9.0.5",
+    "htmlparser2": "^8.0.2",
+    "imap": "^0.8.17",
+    "mailparser": "^3.9.1",
+    "nodemailer": "^7.0.11"
+  }
+}
