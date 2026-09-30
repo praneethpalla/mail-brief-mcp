@@ -2,7 +2,7 @@
 
 A small, least-privilege MCP server for email. It does two jobs: help your AI assistant **summarize what arrived** and **draft replies for you to review**. Nothing else.
 
-Works with any MCP client that runs local servers (Claude Desktop, Codex CLI, Cursor, VS Code, …) and any IMAP provider (Yahoo by default; iCloud, Fastmail, Gmail, Outlook, and others with an app password).
+Works with any MCP client that runs local servers (Claude Desktop, Codex CLI, Cursor, VS Code, …) and any IMAP provider that offers app passwords (Yahoo by default; see [Providers](#providers)).
 
 ## Why so small
 
@@ -40,7 +40,7 @@ npm install
 
 ### 2. Create an app password and put it in a password store
 
-Create an app password with your provider (Yahoo: [account security](https://login.yahoo.com/account/security) → Generate app password). Then store it; the server never reads a password from a file.
+Create an app password with your provider (see [Providers](#providers); Yahoo: [account security](https://login.yahoo.com/account/security) → Generate app password). Then store it; the server never reads a password from a file.
 
 **macOS Keychain:**
 
@@ -94,6 +94,23 @@ args = ["/full/path/to/mail-brief-mcp/src/server.js"]
 ```
 
 Restart the client and ask something like *"Summarize my unread emails from today"* or *"Draft a reply to Alice saying Friday works."* With the strict Keychain setting, macOS asks you to **Allow** access when the server first logs in.
+
+## Providers
+
+The server signs in with an **app password** over IMAP. Providers differ, and their policies change, so check yours:
+
+| Provider | App passwords | `IMAP_HOST` | Notes |
+|---|---|---|---|
+| Yahoo | ✅ Yes (needs 2-step verification) | `imap.mail.yahoo.com` (default) | New accounts may not offer app passwords right away |
+| AOL | ✅ Yes | `imap.aol.com` | Same system as Yahoo |
+| iCloud Mail | ✅ Yes ("app-specific password", needs two-factor authentication) | `imap.mail.me.com` | |
+| Fastmail | ✅ Yes | `imap.fastmail.com` | App passwords can be limited to mail access |
+| Zoho Mail | ✅ Yes ("app-specific password") | `imap.zoho.com` | Region-specific hosts exist (e.g. `imap.zoho.eu`) |
+| Gmail | ⚠️ Sometimes | `imap.gmail.com` | Only with 2-Step Verification on; often unavailable for work/school accounts. Google prefers OAuth |
+| Outlook.com / Microsoft 365 | ❌ No | - | Microsoft requires OAuth for IMAP; not supported yet |
+| Proton Mail | ⚠️ Via Proton Bridge | Bridge's local address | Bridge provides a local IMAP login; untested (it uses a local connection with its own certificate) |
+
+Only Yahoo is planned for live testing so far; the others should work over standard IMAP but are untested. Outlook, and Gmail accounts without app passwords, would need OAuth sign-in, which isn't built yet.
 
 ## Security
 
@@ -149,7 +166,7 @@ export function beforeDraft(ctx) {
 |---|---|
 | All tools, security, and safety hooks | ✅ Covered by the offline test suite (`npm test`: a made-up mailbox, no real logins) |
 | Live use with a real mailbox | ⚠️ Not yet tested live |
-| Providers other than Yahoo | ⚠️ Should work over standard IMAP; untested |
+| Providers other than Yahoo | ⚠️ Should work over standard IMAP with an app password; untested. Outlook / Microsoft 365 isn't supported (requires OAuth) |
 | Windows Credential Manager script | ⚠️ Untested on Windows |
 
 ## Development
