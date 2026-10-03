@@ -132,6 +132,7 @@ This reduces the risk; it can't eliminate it. Language models read your request 
 **Safety hooks.** Automatic checks the agent can't switch off. Warnings come from the server, outside the untrusted block (`⚠️ Server safety check: …`):
 
 - **Reading:** payment red flags (changed bank details, IBANs, account numbers, wire transfers, gift cards, crypto, urgency plus payment), a Reply-To that differs from the sender, and display-name spoofing such as `"support@paypal.com" <billing@evil.example>`.
+- **India-specific red flags:** UPI IDs and "pay to this UPI ID" requests, IFSC codes, NEFT/RTGS/IMPS transfer requests, requests for an OTP, UPI PIN, or CVV, KYC/PAN/Aadhaar "verification" demands, electricity/mobile disconnection threats, courier or customs fees, and ₹/Rs/INR amounts combined with urgency. They're written to stay quiet on routine bank and fund emails ("NEFT credit received", "your SIP of ₹3,000 is due", "never share your OTP").
 - **Drafting:** a warning when a reply would go to a Reply-To address instead of the sender, or when the draft contains payment details.
 
 Add your own rules with `SAFETY_HOOKS_MODULE`: a JavaScript module exporting `readEmail(ctx)` and/or `beforeDraft(ctx)` that return `{ warnings: [...], block: "reason" }`. If a custom hook throws, the action is blocked.
