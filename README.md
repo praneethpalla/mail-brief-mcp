@@ -47,6 +47,8 @@ flowchart LR
 
 No HTTP server, no OAuth, and no files written to disk.
 
+For components, request flows, trust boundaries, and design decisions, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Tools
 
 | Tool | What it does |
