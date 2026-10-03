@@ -122,7 +122,7 @@ test('update_draft replaces the text of its own drafts and removes the old versi
     assert.match(out, new RegExp(`Previous version \\(UID ${first}\\) removed`));
     assert.deepEqual([...mailbox.folders.Drafts.keys()], [second]);
     const saved = await simpleParser(mailbox.folders.Drafts.get(second).raw);
-    assert.equal(saved.text.trim(), 'v2, shorter.');
+    assert.match(saved.text, /^v2, shorter\.\n\nOn .* wrote:\n> q/, 'new text, with the quoted original kept');
     assert.deepEqual(saved.to.value.map(a => a.address), ['alice@example.com']);
     assert.equal(saved.inReplyTo, '<p1@example.com>');
     assert.equal(saved.headers.get('x-mail-brief-draft'), '1');
@@ -170,4 +170,58 @@ test('MCP clients see five tools with risk hints; READ_ONLY leaves only the read
     const unknown = await client.callTool({ name: 'delete_emails', arguments: {} });
     assert.equal(unknown.isError, true);
     await client.close();
+});
+
+// --- Fixes from the first live test ---
+
+test('a plain date means that local calendar day, and filters use the sent date', async () => {
+    const { parseDate } = await import('../src/server.js');
+    const d = parseDate('2026-10-01', 'since');
+    assert.deepEqual([d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()], [2026, 9, 1, 0]);
+
+    await addEmail({ from: 'a@example.com', subject: 'Late Sept', text: 'x', date: new Date(2026, 8, 30, 21, 0) });
+    await addEmail({ from: 'b@example.com', subject: 'October', text: 'x', date: new Date(2026, 9, 1, 8, 0) });
+    const result = json(await brief.searchEmails({ since: '2026-10-01' }));
+    assert.deepEqual(result.emails.map(e => e.subject), ['October']);
+    assert.deepEqual(mailbox.lastCriteria[0][0], 'SENTSINCE');
+});
+
+test('search matches whole words by default; wholeWord: false allows partial matches', async () => {
+    await addEmail({ from: 'a@example.com', subject: 'Your bill is ready', text: 'x' });
+    await addEmail({ from: 'b@example.com', subject: 'Market update', text: 'Funds crossed a billion dollars.' });
+    await addEmail({ from: 'c@example.com', subject: 'Footer', html: '<p>Hi</p><p>Billing questions? Contact us.</p>' });
+    await addEmail({ from: 'd@example.com', subject: 'Reminder', html: '<p>The electricity bill is due Friday.</p>' });
+
+    const whole = json(await brief.searchEmails({ query: 'bill' }));
+    assert.deepEqual(whole.emails.map(e => e.subject).sort(), ['Reminder', 'Your bill is ready']);
+    assert.equal(whole.candidates, 4);
+
+    const partial = json(await brief.searchEmails({ query: 'bill', wholeWord: false }));
+    assert.equal(partial.emails.length, 4);
+});
+
+test('whole-word matching ignores text hidden from the reader', async () => {
+    await addEmail({ from: 'a@example.com', subject: 'Hello', html: '<p>Nothing here</p><div style="display:none">bill</div>' });
+    assert.equal(json(await brief.searchEmails({ query: 'bill' })).emails.length, 0);
+});
+
+test('newsletters and notifications are labelled automated', async () => {
+    await addEmail({ from: 'news@shop.example', subject: 'Deals', text: 'x', headers: { 'List-Unsubscribe': '<https://shop.example/u>' } });
+    await addEmail({ from: 'noreply@bank.example', subject: 'Alert', text: 'x', headers: { 'Auto-Submitted': 'auto-generated' } });
+    await addEmail({ from: 'alice@example.com', subject: 'Lunch?', text: 'x' });
+    const bySubject = Object.fromEntries(json(await brief.listEmails({})).emails.map(e => [e.subject, e.automated]));
+    assert.deepEqual(bySubject, { Deals: true, Alert: true, 'Lunch?': false });
+});
+
+test('update_draft keeps the quoted original unless keepQuote is false', async () => {
+    const uid = await addEmail({ from: 'alice@example.com', subject: 'Plan', text: 'Can we meet Friday?' });
+    const first = Number((await brief.createReplyDraft({ uid, body: 'Sure, let me check my calendar and get back to you tomorrow.' })).content[0].text.match(/Draft UID: (\d+)/)[1]);
+
+    const second = Number((await brief.updateDraft({ uid: first, body: 'Will confirm tomorrow.' })).content[0].text.match(/Draft UID: (\d+)/)[1]);
+    const kept = await simpleParser(mailbox.folders.Drafts.get(second).raw);
+    assert.match(kept.text, /^Will confirm tomorrow\.\n\nOn .* wrote:\n> Can we meet Friday\?/);
+    assert.ok(!kept.text.includes('let me check my calendar'), 'the old reply text is replaced');
+
+    const third = Number((await brief.updateDraft({ uid: second, body: 'Confirmed.', keepQuote: false })).content[0].text.match(/Draft UID: (\d+)/)[1]);
+    assert.equal((await simpleParser(mailbox.folders.Drafts.get(third).raw)).text.trim(), 'Confirmed.');
 });

@@ -22,11 +22,11 @@ The worst a fooled agent can do is leave a reply draft in your Drafts folder, wh
 
 | Tool | What it does |
 |---|---|
-| `list_emails` | Recent emails in a folder, newest first: sender, subject, date, read status. Options: `count` (max 50), `unreadOnly`, `since` |
-| `search_emails` | Finds text in the subject, sender, **or body**; filters by `from`, `since`, `before`, `unreadOnly` |
+| `list_emails` | Recent emails in a folder, newest first: sender, subject, date, read status, and `automated` (newsletters, mailing lists, notifications). Options: `count` (max 50), `unreadOnly`, `since` |
+| `search_emails` | Finds text in the subject, sender, **or body**, as **whole words** by default ("bill" doesn't match "billion"; `wholeWord: false` allows partial matches). Filters by `from`, `since`, `before`, `unreadOnly` |
 | `read_email` | Up to 10 emails as the text a person would see, with sender content in untrusted-content blocks |
 | `create_reply_draft` | A reply draft: recipients, `Re:` subject, and threading come from the original. Options: `replyAll`, `includeQuote` |
-| `update_draft` | Replaces the text of a draft this server created (recipients and subject stay the same). Returns the draft's new UID |
+| `update_draft` | Replaces the reply text of a draft this server created; recipients and subject stay the same, and the quoted original is kept (`keepQuote: false` drops it). Returns the draft's new UID |
 
 ## Setup
 
@@ -112,6 +112,8 @@ The server signs in with an **app password** over IMAP. Providers differ, and th
 
 Only Yahoo is planned for live testing so far; the others should work over standard IMAP but are untested. Outlook, and Gmail accounts without app passwords, would need OAuth sign-in, which isn't built yet.
 
+**Dates** (`since`, `before`) are calendar days in your local time (`2026-10-01` means October 1 where you are) and use the date the email was sent.
+
 ## Security
 
 **Where your password lives.** Only in your password store. The server refuses to start if a plain-text password is set (`MAIL_PASSWORD`, `IMAP_PASSWORD`, `YAHOO_APP_PASSWORD`), keeps the password in memory only, and never logs it. It logs in once and reuses the connection, logging out after 5 idle minutes.
@@ -155,6 +157,7 @@ export function beforeDraft(ctx) {
 | `DRAFTS_FOLDER` | No | auto-detected | Drafts folder name (normally found from the server's `\Drafts` flag) |
 | `READ_ONLY` | No | - | `true` removes the draft tools |
 | `READ_EMAIL_MAX_CHARS` | No | `20000` | Maximum characters of each email body |
+| `SEARCH_SCAN_LIMIT` | No | `100` | How many of the newest candidates a whole-word search checks |
 | `SAFETY_HOOKS_MODULE` | No | - | Path to your custom safety hooks |
 | `IMAP_IDLE_MS` | No | `300000` | Log out after this long without use |
 | `IMAP_LEASE_TIMEOUT_MS` | No | `300000` | If one call holds the connection longer, the connection is closed and the next call logs in fresh |
@@ -165,7 +168,7 @@ export function beforeDraft(ctx) {
 | Area | Status |
 |---|---|
 | All tools, security, and safety hooks | ✅ Covered by the offline test suite (`npm test`: a made-up mailbox, no real logins) |
-| Live use with a real mailbox | ⚠️ Not yet tested live |
+| Live use with a real mailbox (Yahoo, Claude Desktop, Keychain) | ✅ Listing, unread filter, reading, search, reply draft, update, and refusing to delete all tested. Fixes from that test (local dates, whole-word search, keeping the quote on update, the `automated` label) are covered by offline tests |
 | Providers other than Yahoo | ⚠️ Should work over standard IMAP with an app password; untested. Outlook / Microsoft 365 isn't supported (requires OAuth) |
 | Windows Credential Manager script | ⚠️ Untested on Windows |
 

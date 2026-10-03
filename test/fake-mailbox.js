@@ -16,9 +16,12 @@ function matches(raw, criterion) {
         case 'FROM': return /^from:.*$/m.test(header) && header.match(/^from:.*$/m)[0].includes(String(args[0]).toLowerCase());
         case 'BODY': return text.slice(header.length).includes(String(args[0]).toLowerCase());
         case 'HEADER': return header.includes(String(args[1]).toLowerCase());
-        case 'SINCE': case 'BEFORE': {
+        case 'SINCE': case 'BEFORE': case 'SENTSINCE': case 'SENTBEFORE': {
+            // Like IMAP: compares calendar days (local), using the email's Date header
             const date = new Date((header.match(/^date:(.*)$/m) || [])[1]);
-            return key.toUpperCase() === 'SINCE' ? date >= args[0] : date < args[0];
+            const day = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+            const ref = new Date(args[0].getFullYear(), args[0].getMonth(), args[0].getDate());
+            return /SINCE$/i.test(key) ? day >= ref : day < ref;
         }
         case 'OR': return matches(raw, args[0]) || matches(raw, args[1]);
         default: throw new Error(`fake mailbox: unsupported search ${key}`);
@@ -56,6 +59,7 @@ export class FakeMailbox {
                 this.current = folder;
             },
             search: async (criteria) => {
+                this.lastCriteria = criteria;
                 const out = [];
                 for (const [uid, m] of box()) {
                     const ok = criteria.every(c => {

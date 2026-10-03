@@ -43,11 +43,38 @@ export function enabledTools(env = process.env) {
 
 const text = (t, isError = false) => ({ content: [{ type: 'text', text: t }], ...(isError ? { isError: true } : {}) });
 
-function parseDate(value, name) {
+/**
+ * Parse a date argument. A plain YYYY-MM-DD means that calendar day where the user is (local time):
+ * new Date('2026-10-01') would be UTC midnight, which is still Sep 30 in the Americas, and the IMAP
+ * library turns dates into day names using local time.
+ */
+export function parseDate(value, name) {
     if (!value) return null;
-    const date = new Date(value);
+    const plain = String(value).trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const date = plain ? new Date(Number(plain[1]), Number(plain[2]) - 1, Number(plain[3])) : new Date(value);
     if (isNaN(date.getTime())) throw new Error(`Invalid ${name}: "${value}". Use a date like 2026-09-01.`);
     return date;
+}
+
+/**
+ * True when the email looks automated: newsletters, mailing lists, notifications (standard headers)
+ */
+function isAutomated(parsed) {
+    const h = parsed.headers;
+    if (!h) return false;
+    // mailparser groups List-* headers under "list"
+    if (h.has('list') || h.has('list-unsubscribe') || h.has('list-id')) return true;
+    if (/^(bulk|list|junk)$/i.test(String(h.get('precedence') || '').trim())) return true;
+    const auto = String(h.get('auto-submitted') || '').trim().toLowerCase();
+    return Boolean(auto) && auto !== 'no';
+}
+
+/**
+ * Whole-word, case-insensitive match that also works for non-English letters
+ */
+function wholeWordPattern(query) {
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu');
 }
 
 function validateUids(uids, max) {
@@ -63,7 +90,7 @@ function validateUids(uids, max) {
 const TOOLS = [
     {
         name: 'list_emails',
-        description: 'List recent emails in a folder (newest first) with sender, subject, date, and read status. Emails are not marked as read.',
+        description: 'List recent emails in a folder (newest first) with sender, subject, date, read status, and whether the email looks automated (newsletters, mailing lists, notifications). Emails are not marked as read.',
         inputSchema: {
             type: 'object',
             properties: {
@@ -77,11 +104,12 @@ const TOOLS = [
     },
     {
         name: 'search_emails',
-        description: 'Search emails by text (subject, sender, and body), sender, and date range. Returns matches newest first. Emails are not marked as read.',
+        description: 'Search emails by text (subject, sender, and body), sender, and date range. Text matches whole words by default ("bill" does not match "billion"). Dates are calendar days in local time and use the date the email was sent. Returns matches newest first. Emails are not marked as read.',
         inputSchema: {
             type: 'object',
             properties: {
                 query: { type: 'string', description: 'Text to find in the subject, sender, or body' },
+                wholeWord: { type: 'boolean', description: 'Match whole words only (default true); false also matches inside longer words' },
                 from: { type: 'string', description: 'Only emails from this sender (address or name)' },
                 since: { type: 'string', description: 'On or after this date, e.g. 2026-09-01' },
                 before: { type: 'string', description: 'Before this date' },
@@ -123,12 +151,13 @@ const TOOLS = [
     },
     {
         name: 'update_draft',
-        description: 'Replace the text of a reply draft created by this server (recipients and subject stay the same). The draft gets a NEW UID; use the one returned. Only drafts created by mail-brief-mcp can be changed. Nothing is sent.',
+        description: 'Replace the reply text of a draft created by this server. Recipients and subject stay the same, and the quoted original is kept below the new text unless keepQuote is false. The draft gets a NEW UID; use the one returned. Only drafts created by mail-brief-mcp can be changed. Nothing is sent.',
         inputSchema: {
             type: 'object',
             properties: {
                 uid: { type: 'number', description: 'UID of the draft (from the latest create_reply_draft or update_draft result)' },
-                body: { type: 'string', description: 'The new reply text' }
+                body: { type: 'string', description: 'The new reply text (without the quoted original)' },
+                keepQuote: { type: 'boolean', description: 'Keep the quoted original email below the reply (default true)' }
             },
             required: ['uid', 'body']
         },
@@ -154,6 +183,7 @@ export class MailBrief {
             subject: sanitizeField(parsed.subject || '(no subject)'),
             date: parsed.date ? parsed.date.toISOString() : null,
             unread: !message.flags.includes('\\Seen'),
+            automated: isAutomated(parsed),
             ...(warnings.length ? { warnings } : {})
         };
     }
@@ -182,24 +212,55 @@ export class MailBrief {
         const criteria = [];
         if (unreadOnly) criteria.push('UNSEEN');
         const sinceDate = parseDate(since, 'since');
-        if (sinceDate) criteria.push(['SINCE', sinceDate]);
+        if (sinceDate) criteria.push(['SENTSINCE', sinceDate]);
         return this.listResult(await this.listFromSearch(folder, criteria, count));
     }
 
-    async searchEmails({ query, from, since, before, unreadOnly = false, folder = 'INBOX', count } = {}) {
+    async searchEmails({ query, from, since, before, unreadOnly = false, folder = 'INBOX', count, wholeWord = true } = {}) {
         // Validate everything before connecting, so a typo doesn't cost a login
         const sinceDate = parseDate(since, 'since');
         const beforeDate = parseDate(before, 'before');
         const criteria = [];
-        if (query && query.trim()) {
-            const q = query.trim();
-            criteria.push(['OR', ['OR', ['SUBJECT', q], ['FROM', q]], ['BODY', q]]);
-        }
+        const q = (query || '').trim();
+        if (q) criteria.push(['OR', ['OR', ['SUBJECT', q], ['FROM', q]], ['BODY', q]]);
         if (from && from.trim()) criteria.push(['FROM', from.trim()]);
-        if (sinceDate) criteria.push(['SINCE', sinceDate]);
-        if (beforeDate) criteria.push(['BEFORE', beforeDate]);
+        if (sinceDate) criteria.push(['SENTSINCE', sinceDate]);
+        if (beforeDate) criteria.push(['SENTBEFORE', beforeDate]);
         if (unreadOnly) criteria.push('UNSEEN');
-        return this.listResult(await this.listFromSearch(folder, criteria, count));
+        if (!q || wholeWord === false) {
+            return this.listResult(await this.listFromSearch(folder, criteria, count));
+        }
+
+        // IMAP search matches substrings ("bill" in "billion"), so check candidates for the whole word
+        // in what a reader sees: subject, sender, and visible body. Newest first, bounded scan.
+        const limit = Math.min(Math.max(Number(count) || 10, 1), MAX_LIST);
+        const scanLimit = Number(process.env.SEARCH_SCAN_LIMIT) || 100;
+        const pattern = wholeWordPattern(q);
+        const result = await this.mail.withConnection(async (s) => {
+            await s.openBox(folder, true);
+            const candidates = (await s.search(criteria)).reverse();
+            const toScan = candidates.slice(0, scanLimit);
+            const emails = [];
+            for (let i = 0; i < toScan.length && emails.length < limit; i += 10) {
+                for (const m of await s.fetch(toScan.slice(i, i + 10))) {
+                    if (emails.length >= limit) break;
+                    const parsed = await simpleParser(m.raw);
+                    const haystack = `${parsed.subject || ''}\n${parsed.from?.text || ''}\n${visibleBody(parsed)}`;
+                    if (pattern.test(haystack)) emails.push(this.summarizeHeaders(m, parsed));
+                }
+            }
+            return {
+                folder,
+                candidates: candidates.length,
+                scanned: Math.min(toScan.length, candidates.length),
+                returned: emails.length,
+                ...(candidates.length > scanLimit && emails.length < limit
+                    ? { note: `Only the newest ${scanLimit} of ${candidates.length} candidates were checked for whole-word matches. Narrow the search with since/from, or use wholeWord: false.` }
+                    : {}),
+                emails
+            };
+        });
+        return this.listResult(result);
     }
 
     async readEmail({ uids, folder = 'INBOX' } = {}) {
@@ -375,7 +436,7 @@ export class MailBrief {
         });
     }
 
-    async updateDraft({ uid, body } = {}) {
+    async updateDraft({ uid, body, keepQuote = true } = {}) {
         validateUids([uid], 1);
         if (typeof body !== 'string' || !body.trim()) throw new Error('body is required');
 
@@ -391,12 +452,14 @@ export class MailBrief {
                 return text(`Refused: draft UID ${uid} wasn't created by mail-brief-mcp, so it can't be changed through this server.`, true);
             }
 
+            // Keep the quoted original ("On <date>, <sender> wrote:" and the "> " lines) below the new text
+            const quote = keepQuote ? ((existing.text || '').match(/\n\nOn [^\n]* wrote:\n(?:>[^\n]*(?:\n|$))*\s*$/) || [''])[0] : '';
             const draft = {
                 from: existing.from?.text || process.env.MAIL_ADDRESS,
                 to: existing.to?.text,
                 cc: existing.cc?.text,
                 subject: existing.subject || '',
-                text: body,
+                text: body.trimEnd() + quote,
                 inReplyTo: existing.inReplyTo,
                 references: existing.references
             };

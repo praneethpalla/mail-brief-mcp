@@ -197,7 +197,9 @@ export class Session {
         if (this.isReleased()) throw new Error('IMAP connection used after it was released (fetch)');
         if (!uids.length) return Promise.resolve([]);
         return new Promise((resolve, reject) => {
-            const bodies = headersOnly ? 'HEADER.FIELDS (FROM TO SUBJECT DATE REPLY-TO)' : '';
+            const bodies = headersOnly
+                ? 'HEADER.FIELDS (FROM TO SUBJECT DATE REPLY-TO LIST-UNSUBSCRIBE LIST-ID PRECEDENCE AUTO-SUBMITTED)'
+                : '';
             const f = this.conn.fetch(uids, { bodies, size: true });
             const messages = [];
             const pending = [];
