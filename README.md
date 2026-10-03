@@ -18,6 +18,35 @@ Every tool an agent has is something a malicious email can try to talk it into u
 
 The worst a fooled agent can do is leave a reply draft in your Drafts folder, which you'll see before anything happens.
 
+## Architecture
+
+Your MCP client starts the server on your computer and talks to it over a private pipe. Nothing listens on a network port; the only outbound connection is to your mail provider.
+
+```mermaid
+flowchart LR
+    subgraph Mac["Your computer"]
+        Host["Claude Desktop / Codex / Cursor<br/>(MCP host + client)"]
+        Server["node src/server.js<br/>mail-brief-mcp · Node.js"]
+        Keychain[("OS keychain / password store<br/>app password")]
+        Env[".env<br/>address + password command"]
+    end
+    Mail[("IMAP_HOST<br/>imap.mail.yahoo.com, imap.mail.me.com, …")]
+
+    Host <-->|"MCP · JSON-RPC 2.0 over stdio<br/>no network port"| Server
+    Server -->|"child process<br/>MAIL_PASSWORD_COMMAND"| Keychain
+    Server -->|"read at startup"| Env
+    Server <-->|"IMAP over TLS 1.2+<br/>TCP 993"| Mail
+```
+
+| From → To | Protocol | Port | Technology |
+|---|---|---|---|
+| MCP client → server | MCP (JSON-RPC 2.0) over stdio pipes | none | `@modelcontextprotocol/sdk` |
+| Server → password store | Child process running `MAIL_PASSWORD_COMMAND` (e.g. macOS `security`) | none | Node.js `child_process` |
+| Server → mail provider | IMAP over TLS 1.2+ (LOGIN, EXAMINE/SELECT, UID SEARCH, UID FETCH with BODY.PEEK, APPEND, UID STORE/EXPUNGE) | 993 (`IMAP_PORT`) | `imap`, `mailparser`, `nodemailer` (builds drafts only) |
+| Server → SMTP | Never: there is no send capability | (unused) | - |
+
+No HTTP server, no OAuth, and no files written to disk.
+
 ## Tools
 
 | Tool | What it does |
