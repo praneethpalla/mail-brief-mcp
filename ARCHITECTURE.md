@@ -1,8 +1,8 @@
 # Architecture
 
-`mail-brief-mcp` is a local, least-privilege Model Context Protocol (MCP) server. It lets an AI assistant read and search email and create reviewable reply drafts without giving the assistant the ability to send mail.
+`mail-brief-mcp` is a local, least-privilege Model Context Protocol (MCP) server. It lets an AI assistant read and search email and create reviewable reply drafts without the ability to send mail. Optional cleanup tools (`ENABLE_CLEANUP_TOOLS=true`, off by default) move selected messages to Junk and submit user-authorized HTTPS unsubscribe requests.
 
-The current implementation uses MCP over standard input/output (`stdio`). It does not open an HTTP server or listen on a network port. Its only network connection is outbound IMAP traffic to the configured mail provider.
+The current implementation uses MCP over standard input/output (`stdio`). It does not open an HTTP server or listen on a network port. Its network connections are outbound IMAP traffic, HTTPS requests to Microsoft identity endpoints for Outlook OAuth, and explicit unsubscribe requests to public mailing-list endpoints.
 
 ## System diagram
 
@@ -23,15 +23,18 @@ flowchart LR
     subgraph Computer["Your computer or private environment"]
         Transport["MCP stdio transport<br/>JSON-RPC 2.0 messages<br/>No network port"]
         Server["mail-brief-mcp<br/>Node.js process"]
-        Tools["MCP tools<br/>list_emails<br/>search_emails<br/>read_email<br/>create_reply_draft<br/>update_draft"]
+        Tools["MCP tools<br/>list_emails<br/>search_emails<br/>read_email<br/>create_reply_draft<br/>update_draft<br/>get_unsubscribe_options<br/>unsubscribe_email<br/>move_to_junk"]
         Security["Content protection<br/>HTML sanitization<br/>Untrusted-content wrapping<br/>Safety hooks and warnings"]
         CredentialCommand["MAIL_PASSWORD_COMMAND<br/>Node.js child process"]
+        TokenHelper["MAIL_OAUTH_TOKEN_COMMAND<br/>outlook-auth.js token"]
         PasswordStore[("OS keychain or<br/>password manager")]
         HttpAdapter["Optional MCP HTTP transport<br/>Streamable HTTP at /mcp"]
         SecureTunnel["Optional Secure MCP Tunnel"]
     end
 
-    MailProvider[("Email provider<br/>Yahoo / Gmail / iCloud<br/>Fastmail / Zoho")]
+    MailProvider[("Email provider<br/>Yahoo / Gmail / iCloud<br/>Fastmail / Zoho / Outlook.com")]
+    Identity["Microsoft identity endpoints"]
+    Unsubscribe["Public mailing-list endpoint"]
     Drafts[("Mailbox Drafts folder")]
 
     User --> Claude
@@ -51,8 +54,14 @@ flowchart LR
     CredentialCommand -->|"Reads app password"| PasswordStore
     PasswordStore -->|"Returns password in memory"| CredentialCommand
 
+    Server -->|"OAuth mode"| TokenHelper
+    TokenHelper <-->|"Refresh token read / rotation"| PasswordStore
+    TokenHelper <-->|"OAuth over HTTPS · TCP 443"| Identity
+
     Server <-->|"IMAP over TLS 1.2+<br/>TCP 993"| MailProvider
     MailProvider --- Drafts
+    Tools -->|"User-authorized HTTPS POST · TCP 443"| Unsubscribe
+    Tools -->|"Selected UID MOVE to Junk"| MailProvider
     Tools -->|"SEARCH and BODY.PEEK FETCH"| MailProvider
     Tools -->|"IMAP APPEND<br/>Never SMTP"| Drafts
 
@@ -66,9 +75,9 @@ flowchart LR
     classDef external fill:#d9eaf7,stroke:#3d85c6,color:#000;
     classDef security fill:#f4cccc,stroke:#990000,color:#000;
 
-    class Transport,Server,Tools,CredentialCommand,PasswordStore existing;
+    class Transport,Server,Tools,CredentialCommand,TokenHelper,PasswordStore existing;
     class HttpAdapter,SecureTunnel optional;
-    class Claude,Codex,Cursor,ChatGPT,OpenAIAPI,MailProvider,Drafts external;
+    class Claude,Codex,Cursor,ChatGPT,OpenAIAPI,MailProvider,Drafts,Identity,Unsubscribe external;
     class Security security;
 ```
 
@@ -79,6 +88,8 @@ flowchart LR
 | Claude Desktop, Codex CLI, Cursor, or VS Code | `mail-brief-mcp` | MCP/JSON-RPC messages over process `stdin` and `stdout` | None | Local, bidirectional |
 | `mail-brief-mcp` | Password store | Child process running `MAIL_PASSWORD_COMMAND` | None | Local |
 | `mail-brief-mcp` | Mail provider | IMAP protected by TLS 1.2 or later | TCP 993 by default | Outbound |
+| Outlook token helper | Microsoft identity | OAuth device authorization and refresh over HTTPS | TCP 443 | Outbound |
+| `mail-brief-mcp` | Public unsubscribe endpoint | One-click HTTPS POST without redirects | TCP 443 | Outbound, user-authorized |
 | `mail-brief-mcp` | SMTP server | Not implemented | None | No connection |
 | ChatGPT or OpenAI API | Optional HTTP MCP endpoint | MCP Streamable HTTP over HTTPS | Normally TCP 443 | Not implemented yet |
 
@@ -110,7 +121,7 @@ Diagnostic output goes to standard error so that it does not corrupt the MCP mes
 [`src/server.js`](src/server.js) is the application entry point and orchestration layer. It:
 
 - loads settings from `.env`;
-- refuses plain-text password environment variables;
+- refuses plain-text password and token environment variables;
 - publishes the available MCP tool schemas;
 - validates tool inputs;
 - invokes the appropriate email operation;
@@ -118,11 +129,11 @@ Diagnostic output goes to standard error so that it does not corrupt the MCP mes
 - applies content sanitization and safety hooks; and
 - returns MCP text results or structured tool errors.
 
-When `READ_ONLY=true`, the server removes both draft tools from discovery and rejects attempts to call them.
+By default the server exposes only the reading and reply-draft tools; `ENABLE_CLEANUP_TOOLS=true` adds unsubscribe inspection, unsubscribe submission and Junk moves. When `READ_ONLY=true`, the server removes all mutation tools from discovery and rejects attempts to call them, including draft tools, Junk moves and unsubscribe submission. Unsubscribe inspection remains read-only.
 
 ### MCP tools
 
-The server exposes five focused operations:
+The server has eight focused operations (the unsubscribe and Junk tools only with `ENABLE_CLEANUP_TOOLS=true`):
 
 | Tool | Purpose | Mailbox effect |
 |---|---|---|
@@ -130,9 +141,12 @@ The server exposes five focused operations:
 | `search_emails` | Searches sender, subject, and message body | Read-only |
 | `read_email` | Returns sanitized, human-visible message text | Read-only |
 | `create_reply_draft` | Creates a reply tied to an existing message | Adds a message to Drafts |
+| `get_unsubscribe_options` | Inspects standard unsubscribe headers | Read-only; no HTTP request |
+| `unsubscribe_email` | Submits a user-authorized one-click HTTPS request | External subscription change; mailbox unchanged |
+| `move_to_junk` | Moves selected UIDs to Junk using native MOVE | Changes folder; destination UIDs may differ |
 | `update_draft` | Replaces the text of a draft previously created by this server | Adds a replacement and may remove the previous version |
 
-There are deliberately no tools for sending, forwarding, deleting, archiving, flagging, downloading attachments, or composing to arbitrary recipients.
+There are no tools for sending, forwarding, general deletion, archiving, arbitrary folder moves, downloading attachments, or composing to arbitrary recipients. Junk movement and unsubscribe submission are limited-purpose mutation tools.
 
 ### IMAP client and connection manager
 
@@ -145,7 +159,7 @@ Important behaviors include:
 - exclusive connection leases for individual tool calls;
 - an idle logout after five minutes by default;
 - a lease timeout that closes an abnormally long-running connection; and
-- password cache invalidation after an authentication failure.
+- password and OAuth token cache invalidation after an authentication failure.
 
 Reading uses `BODY.PEEK`, which avoids marking fetched messages as read.
 
@@ -173,9 +187,9 @@ An app password can still grant broader mailbox access than this server exposes.
 
 ### Email provider
 
-The provider is selected with `IMAP_HOST`; Yahoo's `imap.mail.yahoo.com` is the default. Standard app-password-based IMAP providers should work. Outlook and Microsoft 365 require OAuth and are not currently supported.
+The provider is selected with `IMAP_HOST`; Yahoo's `imap.mail.yahoo.com` is the default. Standard app-password-based IMAP providers should work. Outlook.com and Microsoft 365 use `MAIL_AUTH=oauth2` with XOAUTH2 and a token command. The included macOS helper implements device sign-in and refresh with Keychain storage.
 
-All provider communication is outbound IMAP over TLS, normally on TCP port 993.
+Mailbox communication is outbound IMAP over TLS, normally on TCP port 993. Microsoft token requests use HTTPS on port 443.
 
 ### Content sanitization and prompt-injection boundary
 
@@ -188,7 +202,7 @@ All provider communication is outbound IMAP over TLS, normally on TCP port 993.
 - neutralizes forged `untrusted-content` markers; and
 - wraps sender-controlled content in blocks with random identifiers.
 
-These controls reduce prompt-injection risk but cannot guarantee that a model will never be influenced by malicious text. The strongest protection is the server's limited tool set: even a misled model cannot send mail or delete messages through this MCP server.
+These controls reduce prompt-injection risk but cannot guarantee that a model will never be influenced by malicious text. The strongest protection is the server's limited tool set: even a misled model cannot send mail or perform general deletion through this MCP server. Junk and unsubscribe tools introduce immediate changes and therefore depend on user-authorized calls as well as their server-side restrictions.
 
 ### Safety hooks
 
@@ -211,7 +225,7 @@ For a request such as “Summarize today's unread emails”:
 2. The model selects `list_emails`, `search_emails`, or `read_email`.
 3. The MCP client sends a tool-call message over `stdio`.
 4. The server validates the arguments before connecting to email.
-5. The server runs `MAIL_PASSWORD_COMMAND` if no password is cached.
+5. When a new connection is needed, the server obtains credentials: `MAIL_PASSWORD_COMMAND` in password mode, or `MAIL_OAUTH_TOKEN_COMMAND` in OAuth mode if no unexpired access token is cached.
 6. The IMAP client establishes or reuses a TLS connection to the provider on port 993.
 7. The server selects the requested folder and performs IMAP `SEARCH` and `FETCH` operations.
 8. MIME content is parsed and reduced to what a human reader would see.
@@ -259,6 +273,7 @@ Adding HTTP changes the threat model. Before doing so, the project should add au
 | AI client → MCP server | Overly broad model actions | Small tool set, input validation, optional `READ_ONLY` mode |
 | Email sender → model | Prompt injection and deceptive content | Visible-text filtering, untrusted blocks, safety warnings |
 | Server → password store | Credential disclosure | Command-based retrieval, memory-only caching, sanitized errors |
+| Token helper → Keychain / Microsoft identity | Refresh-token exposure or failed reauthorization | OS credential store, HTTPS, sanitized errors, no token files |
 | Server → mail provider | Credential or message interception | TLS 1.2+, certificate validation |
 | Draft tool → mailbox | Unintended outgoing communication | Draft-only behavior; no SMTP or send tool |
 | Hosted ChatGPT → private server | Public exposure and unauthorized access | Not enabled currently; use authentication and a secure tunnel |
@@ -271,11 +286,11 @@ This keeps the current deployment simple and avoids opening a listening port. Th
 
 ### IMAP rather than provider-specific APIs
 
-IMAP makes the server usable with several providers through one implementation. The trade-off is reliance on app passwords; providers that require OAuth are unsupported.
+IMAP makes the server usable with several providers through one implementation. Password mode uses app passwords; OAuth mode obtains access tokens through `MAIL_OAUTH_TOKEN_COMMAND`. Tokens are cached in memory until one minute before expiry and cleared after authentication failures. The token command must return JSON with `access_token` and `expires_in`.
 
-### Draft-only writes
+### Limited mailbox writes
 
-Allowing reply drafts provides practical assistance while reserving the irreversible send action for the user. It also sharply limits the impact of prompt injection.
+Allowing reply drafts provides practical assistance while reserving the irreversible send action for the user. Selected-message Junk moves use a fixed destination and native MOVE. Unsubscribe requests are limited to inspected one-click headers and public HTTPS destinations.
 
 ### One shared IMAP connection
 
@@ -290,12 +305,18 @@ Safety does not depend only on instructions given to the model. Unsupported acti
 | Variable | Purpose | Default |
 |---|---|---|
 | `MAIL_ADDRESS` | IMAP login and draft sender | Required |
-| `MAIL_PASSWORD_COMMAND` | Reads the app password from a secure store | Required |
-| `IMAP_HOST` | Provider's IMAP hostname | `imap.mail.yahoo.com` |
+| `MAIL_PASSWORD_COMMAND` | Reads the app password from a secure store | Required in password mode |
+| `MAIL_AUTH` | Chooses password or OAuth authentication | `password` |
+| `MAIL_OAUTH_TOKEN_COMMAND` | Supplies access-token JSON | Required in OAuth mode |
+| `OUTLOOK_CLIENT_ID` | Public Microsoft app ID used by the helper | Required for built-in helper |
+| `OUTLOOK_TENANT` | Microsoft authority tenant | `consumers` |
+| `IMAP_HOST` | Provider's IMAP hostname | Yahoo in password mode; Outlook in OAuth mode |
 | `IMAP_PORT` | Provider's IMAP TCP port | `993` |
 | `IMAP_TLS` | Enables TLS | `true` |
+| `ENABLE_CLEANUP_TOOLS` | Adds the unsubscribe and Junk tools | `false` |
+| `JUNK_FOLDER` | Overrides detected existing Junk/Spam folder | Auto-detected |
 | `DRAFTS_FOLDER` | Overrides automatic Drafts-folder discovery | Auto-detected |
-| `READ_ONLY` | Removes draft tools | `false` |
+| `READ_ONLY` | Disables draft, move and unsubscribe action tools | `false` |
 | `READ_EMAIL_MAX_CHARS` | Maximum returned body length per message | `20000` |
 | `SEARCH_SCAN_LIMIT` | Maximum whole-word search candidates inspected | `100` |
 | `SAFETY_HOOKS_MODULE` | Loads custom safety hooks | Not set |
@@ -303,3 +324,21 @@ Safety does not depend only on instructions given to the model. Unsupported acti
 | `IMAP_LEASE_TIMEOUT_MS` | Maximum exclusive connection lease | `300000` ms |
 | `ENV_FILE` | Settings file relative to the project root | `.env` |
 
+
+## Outlook authentication
+
+`src/oauth.js` implements the Microsoft public-client device flow and refresh grant, using only `offline_access` and `https://outlook.office.com/IMAP.AccessAsUser.All`. `scripts/outlook-auth.js login` runs interactive sign-in separately from MCP; `token` reads a refresh token from macOS Keychain, refreshes it over HTTPS, saves any rotated refresh token, and prints access-token JSON to the parent process. No client secret or SMTP scope is used. Keychain entries are separated by client ID and mailbox address. Other platforms can provide their own secure token command.
+
+OAuth authentication supplies only `xoauth2` to the IMAP library, so it cannot fall back to password login. Existing tool handlers, safety hooks, folder discovery, and draft ownership checks are shared between providers. Offline tests cover device polling, denial, expiration, refresh rotation, token caching, configuration, and XOAUTH2 encoding. Outlook.com sign-in, refresh, listing, and reading without changing read status have been live-validated. Outlook draft creation and updates still need live validation. The node-imap LOGINDISABLED compatibility workaround permits advertised XOAUTH2 only on an encrypted TLS socket; password authentication is never supplied in OAuth mode.
+
+For the complete Outlook component design, sign-in and refresh sequence diagrams, token lifecycle, and verification limits, see [OUTLOOK_ARCHITECTURE.md](OUTLOOK_ARCHITECTURE.md).
+
+## Junk and unsubscribe design
+
+`move_to_junk` accepts up to 10 distinct positive UIDs and a source folder. It discovers an existing destination using the `\Junk` special-use flag or known names; `JUNK_FOLDER` can override the choice. It validates all UIDs before mutation, runs `beforeMoveToJunk` safety hooks, and calls UID MOVE only when MOVE is advertised. Refusing providers without native MOVE avoids node-imap's copy/delete/expunge emulation. A move is not a spam report, sender block, or unsubscribe.
+
+`src/unsubscribe.js` parses raw List-Unsubscribe and List-Unsubscribe-Post header lines. `get_unsubscribe_options` returns links as untrusted metadata without contacting them. `unsubscribe_email` re-fetches the message, requires `confirmed=true` and an exact match to its one-click URL, runs `beforeUnsubscribe` hooks, then sends the `List-Unsubscribe=One-Click` form body via HTTPS POST. The server does not independently authenticate DKIM or automatically act on sender content. Ordinary web forms and mailto links require user completion.
+
+The HTTP transport permits only HTTPS port 443 without embedded credentials or fragments. It resolves the hostname, rejects mixed public/private DNS answers and nonpublic IP ranges, and pins the validated IP for the request while preserving hostname TLS verification. It sends no cookies or authorization and follows no redirects. A 15-second request deadline bounds external calls; response bodies are discarded. HTTP success reports request acceptance, not guaranteed list removal. Requests that fail after transmission may already have taken effect and are not automatically retried.
+
+These tools are offered only with `ENABLE_CLEANUP_TOOLS=true`. Both mutation tools are disabled by READ_ONLY; inspection remains enabled. New external HTTPS trust boundaries allow subscription changes but must never expose OAuth access tokens, refresh tokens, or email content. Offline tests cover these guards; live Junk and unsubscribe actions are pending an explicitly selected target.

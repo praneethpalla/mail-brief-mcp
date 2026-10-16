@@ -13,6 +13,27 @@ import Imap from 'imap';
 import { exec } from 'child_process';
 
 export const DEFAULT_IMAP_HOST = 'imap.mail.yahoo.com';
+export function imapHost(env = process.env) {
+    return env.IMAP_HOST || (env.MAIL_AUTH === 'oauth2' ? 'outlook.office365.com' : DEFAULT_IMAP_HOST);
+}
+
+export function xoauth2(address, token) {
+    if (/[\x00-\x20\x7f]/.test(address) || /[\x00-\x20\x7f]/.test(token) || !token) {
+        throw new Error('Invalid OAuth address or access token');
+    }
+    return Buffer.from(`user=${address}\x01auth=Bearer ${token}\x01\x01`).toString('base64');
+}
+
+// node-imap 0.8 treats LOGINDISABLED as disabling all authentication. It only
+// disables LOGIN; Outlook still permits advertised XOAUTH2 over the TLS socket.
+export function enableOAuthLogin(imap) {
+    const supports = imap.serverSupports.bind(imap);
+    imap.serverSupports = capability => {
+        if (capability === 'LOGINDISABLED' && imap.state === 'connected' &&
+            imap._sock?.encrypted && supports('AUTH=XOAUTH2')) return false;
+        return supports(capability);
+    };
+}
 
 export class MailClient {
     constructor() {
@@ -20,6 +41,7 @@ export class MailClient {
         this.lock = Promise.resolve();
         this.idleTimer = null;
         this.passwordCache = null;
+        this.tokenCache = null;
     }
 
     // ------------------------------------------------------------------
@@ -51,15 +73,44 @@ export class MailClient {
         return password;
     }
 
+    async getOAuthToken() {
+        if (this.tokenCache && Date.now() < this.tokenCache.expiresAt) return this.tokenCache.token;
+        const command = process.env.MAIL_OAUTH_TOKEN_COMMAND;
+        if (!command) throw new Error('MAIL_OAUTH_TOKEN_COMMAND is not set');
+        const output = await new Promise((resolve, reject) => {
+            exec(command, { timeout: 120000, windowsHide: true }, (err, stdout) => {
+                if (err) return reject(new Error('MAIL_OAUTH_TOKEN_COMMAND failed. Check your token helper or run outlook:login again.'));
+                resolve(stdout);
+            });
+        });
+        let data;
+        try { data = JSON.parse(output); }
+        catch { throw new Error('OAuth token helper must print JSON with access_token and expires_in'); }
+        if (typeof data.access_token !== 'string' || !data.access_token ||
+            !Number.isFinite(Number(data.expires_in)) || Number(data.expires_in) <= 0) {
+            throw new Error('OAuth token helper returned an invalid token response');
+        }
+        xoauth2(process.env.MAIL_ADDRESS || '', data.access_token);
+        this.tokenCache = { token: data.access_token, expiresAt: Date.now() + Number(data.expires_in) * 1000 - 60000 };
+        return data.access_token;
+    }
+
+    async authentication() {
+        if (process.env.MAIL_AUTH === 'oauth2') {
+            return { xoauth2: xoauth2(process.env.MAIL_ADDRESS, await this.getOAuthToken()) };
+        }
+        return { password: await this.getPassword() };
+    }
+
     async openConnection() {
         if (!process.env.MAIL_ADDRESS) throw new Error('MAIL_ADDRESS is not set');
-        const password = await this.getPassword();
-        const host = process.env.IMAP_HOST || DEFAULT_IMAP_HOST;
+        const auth = await this.authentication();
+        const host = imapHost();
 
         return new Promise((resolve, reject) => {
             const imap = new Imap({
                 user: process.env.MAIL_ADDRESS,
-                password,
+                ...auth,
                 host,
                 port: Number(process.env.IMAP_PORT) || 993,
                 tls: process.env.IMAP_TLS !== 'false',
@@ -67,6 +118,7 @@ export class MailClient {
                 connTimeout: 30000,
                 tlsOptions: { rejectUnauthorized: true, servername: host, minVersion: 'TLSv1.2' }
             });
+            if (auth.xoauth2) enableOAuthLogin(imap);
             const timer = setTimeout(() => {
                 imap.end();
                 reject(new Error('Connection to the mail server timed out'));
@@ -74,9 +126,12 @@ export class MailClient {
             imap.once('ready', () => { clearTimeout(timer); resolve(imap); });
             imap.once('error', (err) => {
                 clearTimeout(timer);
-                if (/AUTHENTICATIONFAILED|Invalid credentials|authentication failed/i.test(err.message)) {
+                if (err.source === 'authentication' || /AUTHENTICATIONFAILED|Invalid credentials|authentication failed/i.test(err.message)) {
+                    this.tokenCache = null;
                     this.passwordCache = null;  // re-read from the password store next time (e.g. after rotation)
-                    reject(new Error(`Login failed: ${err.message}. Check the app password in your password store.`));
+                    reject(new Error(process.env.MAIL_AUTH === 'oauth2'
+                        ? 'Login failed. Check Microsoft consent, MAIL_ADDRESS, and that IMAP is enabled; run outlook:login again.'
+                        : 'Login failed. Check the app password in your password store.'));
                 } else {
                     reject(new Error(`Mail server connection failed: ${err.message}`));
                 }

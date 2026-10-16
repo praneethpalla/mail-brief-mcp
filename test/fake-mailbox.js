@@ -29,10 +29,11 @@ function matches(raw, criterion) {
 }
 
 export class FakeMailbox {
-    constructor({ uidplus = true } = {}) {
-        this.folders = { INBOX: new Map(), Drafts: new Map() };
+    constructor({ uidplus = true, move = true } = {}) {
+        this.folders = { INBOX: new Map(), Drafts: new Map(), Junk: new Map() };
         this.nextUid = 100;
         this.uidplus = uidplus;
+        this.supportsMove = move;
         this.connections = 0;
         this.current = null;
     }
@@ -79,6 +80,7 @@ export class FakeMailbox {
                 }),
             getBoxes: async () => ({
                 INBOX: { attribs: [], delimiter: '/' },
+                Junk: { attribs: ['\\Junk'], special_use_attrib: '\\Junk', delimiter: '/' },
                 Drafts: { attribs: ['\\Drafts'], special_use_attrib: '\\Drafts', delimiter: '/' }
             }),
             append: async (raw, { mailbox, flags }) => {
@@ -87,7 +89,14 @@ export class FakeMailbox {
             },
             addFlags: async (uids, flag) => { for (const u of uids) box().get(u)?.flags.push(flag); },
             expunge: async (uids) => { for (const u of uids) if (box().get(u)?.flags.includes('\\Deleted')) box().delete(u); },
-            serverSupports: (cap) => cap === 'UIDPLUS' && this.uidplus
+            move: async (uids, destination) => {
+                for (const uid of uids) {
+                    const message = box().get(uid);
+                    this.add(destination, message.raw, message.flags);
+                    box().delete(uid);
+                }
+            },
+            serverSupports: (cap) => (cap === 'UIDPLUS' && this.uidplus) || (cap === 'MOVE' && this.supportsMove)
         };
     }
 }

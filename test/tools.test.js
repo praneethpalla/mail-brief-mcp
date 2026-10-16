@@ -18,6 +18,7 @@ beforeEach(() => {
 });
 afterEach(() => {
     delete process.env.READ_ONLY;
+    delete process.env.ENABLE_CLEANUP_TOOLS;
 });
 
 async function addEmail(fields, flags = []) {
@@ -146,7 +147,7 @@ test('without UIDPLUS, update_draft keeps the old version instead of risking oth
     assert.equal(mailbox.folders.Drafts.size, 2);
 });
 
-test('MCP clients see five tools with risk hints; READ_ONLY leaves only the reading tools', async () => {
+test('MCP clients see five tools with risk hints; cleanup tools are opt-in; READ_ONLY leaves only the reading tools', async () => {
     const connect = async () => {
         const [c, s] = InMemoryTransport.createLinkedPair();
         await brief.createMcpServer().connect(s);
@@ -159,11 +160,21 @@ test('MCP clients see five tools with risk hints; READ_ONLY leaves only the read
     assert.deepEqual(tools.map(t => t.name), ['list_emails', 'search_emails', 'read_email', 'create_reply_draft', 'update_draft']);
     assert.equal(tools.find(t => t.name === 'read_email').annotations.readOnlyHint, true);
     assert.equal(tools.find(t => t.name === 'update_draft').annotations.destructiveHint, true);
+    const off = await client.callTool({ name: 'move_to_junk', arguments: { uids: [1] } });
+    assert.equal(off.isError, true);
+    assert.match(off.content[0].text, /disabled on this server/);
+    await client.close();
+
+    process.env.ENABLE_CLEANUP_TOOLS = 'true';
+    client = await connect();
+    const cleanup = (await client.listTools()).tools;
+    assert.deepEqual(cleanup.map(t => t.name), ['list_emails', 'search_emails', 'read_email', 'create_reply_draft', 'update_draft', 'get_unsubscribe_options', 'unsubscribe_email', 'move_to_junk']);
+    assert.equal(cleanup.find(t => t.name === 'move_to_junk').annotations.destructiveHint, true);
     await client.close();
 
     process.env.READ_ONLY = 'true';
     client = await connect();
-    assert.deepEqual((await client.listTools()).tools.map(t => t.name), ['list_emails', 'search_emails', 'read_email']);
+    assert.deepEqual((await client.listTools()).tools.map(t => t.name), ['list_emails', 'search_emails', 'read_email', 'get_unsubscribe_options']);
     const refused = await client.callTool({ name: 'create_reply_draft', arguments: { uid: 1, body: 'x' } });
     assert.equal(refused.isError, true);
     assert.match(refused.content[0].text, /disabled on this server/);
