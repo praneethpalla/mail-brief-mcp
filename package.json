@@ -1,6 +1,6 @@
 {
   "name": "mail-brief-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A small, least-privilege MCP server for email: summarize and draft replies, with optional Junk moves and one-click unsubscribe. Works with any IMAP provider, including Outlook.com via OAuth.",
   "type": "module",
   "main": "src/server.js",

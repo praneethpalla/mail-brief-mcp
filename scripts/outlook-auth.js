@@ -14,6 +14,15 @@ async function keychain(args) {
     try { return (await run('/usr/bin/security', args, { timeout: 120000 })).stdout.replace(/\r?\n$/, ''); }
     catch { throw new Error('Microsoft token Keychain access failed. Allow access when prompted, or run outlook:login first.'); }
 }
+// The token goes to `security -i` on stdin, so it never appears in the process list.
+async function keychainSave(account, service, token) {
+    const safe = value => /^[\x21-\x7e]+$/.test(value) && !/["\\]/.test(value);
+    if (![account, service, token].every(safe)) throw new Error('Unexpected characters in the Microsoft token or account; not saved.');
+    const saving = run('/usr/bin/security', ['-i'], { timeout: 120000 });
+    saving.child.stdin.end(`add-generic-password -U -a "${account}" -s "${service}" -w "${token}"\n`);
+    try { await saving; }
+    catch { throw new Error('Saving the Microsoft token in Keychain failed. Allow access when prompted, then run outlook:login again.'); }
+}
 async function main() {
     if (process.platform !== 'darwin') throw new Error('This helper uses macOS Keychain. On other systems use MAIL_OAUTH_TOKEN_COMMAND with your own secure token helper.');
     if (!process.env.MAIL_ADDRESS) throw new Error('MAIL_ADDRESS is required');
@@ -24,7 +33,7 @@ async function main() {
     const oauth = new OutlookOAuth({
         clientId: process.env.OUTLOOK_CLIENT_ID, tenant: process.env.OUTLOOK_TENANT || 'consumers',
         readRefreshToken: () => keychain(['find-generic-password', '-a', account, '-s', service, '-w']),
-        saveRefreshToken: token => keychain(['add-generic-password', '-U', '-a', account, '-s', service, '-w', token])
+        saveRefreshToken: token => keychainSave(account, service, token)
     });
     if (mode === 'login') {
         await oauth.login(message => console.error(message));

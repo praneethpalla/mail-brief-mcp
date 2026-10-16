@@ -28,7 +28,7 @@ const projectRoot = path.resolve(path.dirname(__filename), '..');
 // ENV_FILE picks a different settings file (e.g. for a test account); default: .env in the project folder
 dotenv.config({ path: path.resolve(projectRoot, process.env.ENV_FILE || '.env'), quiet: true });
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.2.1';
 const DRAFT_MARKER_HEADER = 'X-Mail-Brief-Draft';
 const MAX_LIST = 50;
 const MAX_READ = 10;
